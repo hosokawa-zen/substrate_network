@@ -225,6 +225,8 @@ impl pallet_grandpa::Config for Runtime {
 
 parameter_types! {
 	pub const MinimumPeriod: u64 = SLOT_DURATION / 2;
+	// One can own at most 9,999 Kitties
+    pub const MaxKittyOwned: u32 = 9999;
 }
 
 impl pallet_timestamp::Config for Runtime {
@@ -305,7 +307,9 @@ impl pallet_sudo::Config for Runtime {
 /// Configure the pallet-template in pallets/template.
 impl pallet_template::Config for Runtime {
 	type Event = Event;
-	type MaxBytesInHash = frame_support::traits::ConstU32<64>;
+	type Currency = Balances;
+	type KittyRandomness = RandomnessCollectiveFlip; 
+	type MaxKittyOwned = MaxKittyOwned;
 }
 
 // Create the runtime by composing the FRAME pallets that were previously configured.

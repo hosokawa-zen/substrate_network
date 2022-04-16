@@ -1,109 +1,274 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 
-  pub use pallet::*;
+pub use pallet::*;
 
-  #[frame_support::pallet]
-  pub mod pallet {
-      use frame_support::pallet_prelude::*;
-      use frame_system::pallet_prelude::*;
+#[frame_support::pallet]
+pub mod pallet {
+    use frame_support::pallet_prelude::*;
+    use frame_system::pallet_prelude::*;
+    use frame_support::{
+        sp_runtime::traits::Hash,
+        traits::{ Randomness, Currency, tokens::ExistenceRequirement },
+        transactional
+    };
+    use sp_io::hashing::blake2_128;
 
-      // The struct on which we build all of our Pallet logic.
-      #[pallet::pallet]
-      #[pallet::generate_store(pub(super) trait Store)]
-      pub struct Pallet<T>(_);
+    #[cfg(feature = "std")]
+    use frame_support::serde::{Deserialize, Serialize};
+    use scale_info::TypeInfo;
 
-      /* Placeholder for defining custom types. */
+    // ACTION #1: Write a Struct to hold Kitty information.
+    type AccountOf<T> = <T as frame_system::Config>::AccountId;
+    type BalanceOf<T> = <<T as Config>::Currency as Currency<<T as frame_system::Config>::AccountId>>::Balance;
 
-      // TODO: Update the `config` block below
-      #[pallet::config]
-      pub trait Config: frame_system::Config {
-		/// Because this pallet emits events, it depends on the runtime's definition of an event.
-        type Event: From<Event<Self>> + IsType<<Self as frame_system::Config>::Event>;
-        /// For constraining the maximum bytes of a hash used for any proof
-        type MaxBytesInHash: Get<u32>;
-      }
+    // Struct for holding Kitty information.
+    #[derive(Clone, Encode, Decode, PartialEq, RuntimeDebug, TypeInfo, MaxEncodedLen)]
+    #[scale_info(skip_type_params(T))]
+    #[codec(mel_bound())]
+    pub struct Kitty<T: Config> {
+        pub dna: [u8; 16],
+        pub price: Option<BalanceOf<T>>,
+        pub gender: Gender,
+        pub owner: AccountOf<T>,
+    }
 
-      // TODO: Update the `event` block below
-	  #[pallet::event]
-	  #[pallet::generate_deposit(pub(super) fn deposit_event)]
-	  pub enum Event<T: Config> {
-		  /// Event emitted when a proof has been claimed. [who, claim]
-		  ClaimCreated(T::AccountId, BoundedVec<u8, T::MaxBytesInHash>),
-		  /// Event emitted when a claim is revoked by the owner. [who, claim]
-		  ClaimRevoked(T::AccountId, BoundedVec<u8, T::MaxBytesInHash>),
-	  }
+    // ACTION #2: Enum declaration for Gender.
+    #[derive(Clone, Encode, Decode, PartialEq, RuntimeDebug, TypeInfo, MaxEncodedLen)]
+    #[cfg_attr(feature = "std", derive(Serialize, Deserialize))]
+    pub enum Gender {
+        Male,
+        Female,
+    }
 
-      // TODO: Update the `error` block below
-      #[pallet::error]
-      pub enum Error<T> {
-		   /// The proof has already been claimed.
-		   ProofAlreadyClaimed,
-		   /// The proof does not exist, so it cannot be revoked.
-		   NoSuchProof,
-		   /// The proof is claimed by another account, so caller can't revoke it.
-		   NotProofOwner,
-	  }
+    // The struct on which we build all of our Pallet logic.
+    #[pallet::pallet]
+    #[pallet::generate_store(pub(super) trait Store)]
+    pub struct Pallet<T>(_);
+
+    // TODO: Update the `config` block below
+    #[pallet::config]
+    pub trait Config: frame_system::Config {
+      /// Because this pallet emits events, it depends on the runtime's definition of an event.
+      type Event: From<Event<Self>> + IsType<<Self as frame_system::Config>::Event>;
+      /// The Currency handler for the Kitties pallet.
+      type Currency: Currency<Self::AccountId>;
+
+      type KittyRandomness: Randomness<Self::Hash, Self::BlockNumber>;
+      #[pallet::constant]
+      type MaxKittyOwned: Get<u32>;
+    }
+
+    // TODO: Update the `event` block below
+    #[pallet::event]
+    #[pallet::generate_deposit(pub(super) fn deposit_event)]
+    pub enum Event<T: Config> {
+      /// A new Kitty was successfully created. \[sender, kitty_id\]
+      Created(T::AccountId, T::Hash),
+      /// Kitty price was successfully set. \[sender, kitty_id, new_price\]
+      PriceSet(T::AccountId, T::Hash, Option<BalanceOf<T>>),
+      /// A Kitty was successfully transferred. \[from, to, kitty_id\]
+      Transferred(T::AccountId, T::AccountId, T::Hash),
+      /// A Kitty was successfully bought. \[buyer, seller, kitty_id, bid_price\]
+      Bought(T::AccountId, T::AccountId, T::Hash, BalanceOf<T>),
+    }
+
+    // TODO: Update the `error` block below
+    #[pallet::error]
+    pub enum Error<T> {
+    /// Handles arithmetic overflow when incrementing the Kitty counter.
+    CountForKittiesOverflow,
+    /// An account cannot own more Kitties than `MaxKittyCount`.
+    ExceedMaxKittyOwned,
+    /// Buyer cannot be the owner.
+    BuyerIsKittyOwner,
+    /// Cannot transfer a kitty to its owner.
+    TransferToSelf,
+    /// This kitty already exists
+    KittyExists,
+    /// This kitty doesn't exist
+    KittyNotExist,
+    /// Handles checking that the Kitty is owned by the account transferring, buying or setting a price for it.
+    NotKittyOwner,
+    /// Ensures the Kitty is for sale.
+    KittyNotForSale,
+    /// Ensures that the buying price is greater than the asking price.
+    KittyBidPriceTooLow,
+    /// Ensures that an account has enough funds to purchase a Kitty.
+    NotEnoughBalance,
+    }
 
       // TODO: add #[pallet::storage] block
-	  #[pallet::storage]
-	  /// Maps each proof to its owner and block number when the proof was made
-	  pub(super) type Proofs<T: Config> = StorageMap<
-		  _,
-		  Blake2_128Concat,
-		  BoundedVec<u8, T::MaxBytesInHash>,
-		  (T::AccountId, T::BlockNumber),
-		  OptionQuery,
-	  >;
-	  
-      // TODO: Update the `call` block below
-      #[pallet::call]
-      impl<T: Config> Pallet<T> {
-        #[pallet::weight(1_000)]
-        pub fn create_claim(
-          origin: OriginFor<T>,
-          proof: BoundedVec<u8, T::MaxBytesInHash>,
-        ) -> DispatchResult {
-          // Chec that the extrinsic was signed and get the signer
-          let sender = ensure_signed(origin)?;
+    #[pallet::storage]
+    #[pallet::getter(fn count_for_kitties)]
+    /// Keeps track of the number of Kitties in existence.
+    pub(super) type CountForKitties<T: Config> = StorageValue<_, u64, ValueQuery>;
 
-          // Verify that the specified proof has not already been claimed.
-          ensure!(!Proofs::<T>::contains_key(&proof), Error::<T>::ProofAlreadyClaimed);
+    #[pallet::storage]
+    #[pallet::getter(fn kitties)]
+    pub(super) type Kitties<T: Config> = StorageMap<
+        _,
+        Twox64Concat,
+        T::Hash,
+        Kitty<T>,
+    >;
 
-          // Get the block number from the FRAME System pallet.
-          let current_block = <frame_system::Pallet<T>>::block_number();
+    #[pallet::storage]
+    #[pallet::getter(fn kitties_owned)]
+    /// Keeps track of what accounts own what Kitty.
+    pub(super) type KittiesOwned<T: Config> = StorageMap<
+        _,
+        Twox64Concat,
+        T::AccountId,
+        BoundedVec<T::Hash, T::MaxKittyOwned>,
+        ValueQuery,
+    >;
 
-          // Store the proof with the sender and block number.
-          Proofs::<T>::insert(&proof, (&sender, current_block));
+    // TODO: Update the `call` block below
+    #[pallet::call]
+    impl<T: Config> Pallet<T> {
 
-          // Emit an event that the claim was created.
-          Self::deposit_event(Event::ClaimCreated(sender, proof));
+      // Part III: create_kitty
+      #[pallet::weight(100)]
+      pub fn create_kitty(origin: OriginFor<T>) -> DispatchResult {
+          let sender = ensure_signed(origin)?; // <- add this line
+          let kitty_id = Self::mint(&sender, None, None)?; // <- add this line
+          // Logging to the console
+          log::info!("A kitty is born with ID: {:?}.", kitty_id); // <- add this line
+
+          // ACTION #4: Deposit `Created` event
 
           Ok(())
-        }
+      }
 
-        #[pallet::weight(10_000)]
-        pub fn revoke_claim(
+      // Part IV: set_price
+      
+      // TODO Part IV: transfer
+      #[pallet::weight(100)]
+      pub fn transfer(
           origin: OriginFor<T>,
-          proof: BoundedVec<u8, T::MaxBytesInHash>,
-        ) -> DispatchResult {
-          // Check that the extrinsic was signed and get the signer.
-          let sender = ensure_signed(origin)?;
+          to: T::AccountId,
+          kitty_id: T::Hash
+      ) -> DispatchResult {
+          let from = ensure_signed(origin)?;
 
-          // Verify that the specified proof has been claimed
-          ensure!(Proofs::<T>::contains_key(&proof), Error::<T>::NoSuchProof);
+          // Ensure the kitty exists and is called by the kitty owner
+          ensure!(Self::is_kitty_owner(&kitty_id, &from)?, <Error<T>>::NotKittyOwner);
 
-          // Get owner of the claim.
-          let (owner, _) = Proofs::<T>::get(&proof).expect("All proofs must have an owner!");
+          // Verify the kitty is not transferring back to its owner.
+          ensure!(from != to, <Error<T>>::TransferToSelf);
 
-          // Verify that sender of the current call is the claim owner.
-          ensure!(sender == owner, Error::<T>::NotProofOwner);
+          // Verify the recipient has the capacity to receive one more kitty
+          let to_owned = <KittiesOwned<T>>::get(&to);
+          ensure!((to_owned.len() as u32) < T::MaxKittyOwned::get(), <Error<T>>::ExceedMaxKittyOwned);
 
-          // Remove claim from storage.
-          Proofs::<T>::remove(&proof);
+          Self::transfer_kitty_to(&kitty_id, &to)?;
 
-          // Emit an event that the claim was erased.
-          Self::deposit_event(Event::ClaimRevoked(sender, proof));
+          Self::deposit_event(Event::Transferred(from, to, kitty_id));
+
           Ok(())
+      }
+
+      // TODO Part IV: buy_kitty
+
+      // TODO Part IV: breed_kitty
+
+    }
+
+    impl<T: Config> Pallet<T> {
+      // ACTION #4: helper function for Kitty struct
+
+      // TODO Part III: helper functions for dispatchable functions
+
+      // ACTION #6: function to randomly generate DNA
+
+      fn gen_gender() -> Gender {
+        let random = T::KittyRandomness::random(&b"gender"[..]).0;
+        match random.as_ref()[0] % 2 {
+            0 => Gender::Male,
+            _ => Gender::Female,
         }
       }
-  }
+  
+      fn gen_dna() -> [u8; 16] {
+        let payload = (
+            T::KittyRandomness::random(&b"dna"[..]).0,
+            <frame_system::Pallet<T>>::extrinsic_index().unwrap_or_default(),
+            <frame_system::Pallet<T>>::block_number(),
+        );
+        payload.using_encoded(blake2_128)
+      }
+  
+      // Helper to mint a Kitty.
+      pub fn mint(
+        owner: &T::AccountId,
+        dna: Option<[u8; 16]>,
+        gender: Option<Gender>,
+      ) -> Result<T::Hash, Error<T>> {
+        let kitty = Kitty::<T> {
+            dna: dna.unwrap_or_else(Self::gen_dna),
+            price: None,
+            gender: gender.unwrap_or_else(Self::gen_gender),
+            owner: owner.clone(),
+        };
+
+        let kitty_id = T::Hashing::hash_of(&kitty);
+
+        // Performs this operation first as it may fail
+        let new_cnt = Self::count_for_kitties().checked_add(1)
+            .ok_or(<Error<T>>::CountForKittiesOverflow)?;
+
+        // Check if the kitty does not already exist in our storage map
+        ensure!(Self::kitties(&kitty_id) == None, <Error<T>>::KittyExists);
+
+        // Performs this operation first because as it may fail
+        <KittiesOwned<T>>::try_mutate(&owner, |kitty_vec| {
+            kitty_vec.try_push(kitty_id)
+        }).map_err(|_| <Error<T>>::ExceedMaxKittyOwned)?;
+
+        <Kitties<T>>::insert(kitty_id, kitty);
+        <CountForKitties<T>>::put(new_cnt);
+        Ok(kitty_id)
+      }      
+
+      // TODO Part IV: transfer_kitty_to
+      #[transactional]
+      pub fn transfer_kitty_to(
+          kitty_id: &T::Hash,
+          to: &T::AccountId,
+      ) -> Result<(), Error<T>> {
+          let mut kitty = Self::kitties(&kitty_id).ok_or(<Error<T>>::KittyNotExist)?;
+
+          let prev_owner = kitty.owner.clone();
+
+          // Remove `kitty_id` from the KittiesOwned vector of `prev_owner`
+          <KittiesOwned<T>>::try_mutate(&prev_owner, |owned| {
+              if let Some(ind) = owned.iter().position(|&id| id == *kitty_id) {
+                  owned.swap_remove(ind);
+                  return Ok(());
+              }
+              Err(())
+          }).map_err(|_| <Error<T>>::KittyNotExist)?;
+
+          // Update the kitty owner
+          kitty.owner = to.clone();
+          // Reset the ask price so the kitty is not for sale until `set_price()` is called
+          // by the current owner.
+          kitty.price = None;
+
+          <Kitties<T>>::insert(kitty_id, kitty);
+
+          <KittiesOwned<T>>::try_mutate(to, |vec| {
+              vec.try_push(*kitty_id)
+          }).map_err(|_| <Error<T>>::ExceedMaxKittyOwned)?;
+
+          Ok(())
+      }
+
+      pub fn is_kitty_owner(kitty_id: &T::Hash, acct: &T::AccountId) -> Result<bool, Error<T>> {
+        match Self::kitties(kitty_id) {
+            Some(kitty) => Ok(kitty.owner == *acct),
+            None => Err(<Error<T>>::KittyNotExist)
+        }
+      }
+    }
+}
